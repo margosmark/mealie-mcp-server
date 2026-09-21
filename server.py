@@ -1,18 +1,20 @@
 """
 Mealie MCP Server — Minimal, self-built MCP server for Mealie recipe management.
 Covers: recipes, meal plans, shopping lists, categories, tags, foods, units.
+
+Tool names use the mealie_ prefix per MCP best practices so they never collide
+with tools from other MCP servers.
 """
 
 import os
-import json
-from typing import Optional
-from fastmcp import FastMCP
+
 import httpx
+from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 # --- Config ---
 MEALIE_URL = os.environ["MEALIE_URL"].rstrip("/")
 MEALIE_API_KEY = os.environ["MEALIE_API_KEY"]
-HOUSEHOLD_ID = os.environ.get("MEALIE_HOUSEHOLD_ID", "5bc04442-abbd-4aab-b88f-a7105809bc18")
 
 HEADERS = {
     "Authorization": f"Bearer {MEALIE_API_KEY}",
@@ -22,38 +24,82 @@ HEADERS = {
 
 mcp = FastMCP("mealie")
 
+# --- Annotation presets ---
+ANNOT_READ = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "idempotentHint": True,
+    "openWorldHint": True,
+}
+ANNOT_WRITE = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+ANNOT_DESTRUCTIVE = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+
 
 # --- Helpers ---
-def _get(path: str, params: dict = None) -> dict:
-    r = httpx.get(f"{MEALIE_URL}{path}", headers=HEADERS, params=params, timeout=30)
-    r.raise_for_status()
+def _request(method: str, path: str, params: dict | None = None, data: dict | None = None) -> dict:
+    """Single HTTP entry point with actionable error handling."""
+    try:
+        r = httpx.request(
+            method,
+            f"{MEALIE_URL}{path}",
+            headers=HEADERS,
+            params=params,
+            json=data,
+            timeout=30,
+        )
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text[:200]
+        raise ToolError(
+            f"Mealie API returned {e.response.status_code} for {path}: {detail}. "
+            f"Verify the slug/ID exists (use mealie_search_recipes or the "
+            f"mealie_list_* tools to look it up) and that the API key is valid."
+        )
+    except httpx.RequestError as e:
+        raise ToolError(
+            f"Cannot reach Mealie at {MEALIE_URL}: {e}. "
+            f"Check that the Mealie service is running and reachable."
+        )
     return r.json() if r.text else {}
 
 
-def _post(path: str, data: dict = None) -> dict:
-    r = httpx.post(f"{MEALIE_URL}{path}", headers=HEADERS, json=data or {}, timeout=30)
-    r.raise_for_status()
-    return r.json() if r.text else {}
+def _get(path: str, params: dict | None = None) -> dict:
+    return _request("GET", path, params=params)
 
 
-def _put(path: str, data: dict = None) -> dict:
-    r = httpx.put(f"{MEALIE_URL}{path}", headers=HEADERS, json=data or {}, timeout=30)
-    r.raise_for_status()
-    return r.json() if r.text else {}
+def _post(path: str, data: dict | None = None) -> dict:
+    return _request("POST", path, data=data or {})
+
+
+def _put(path: str, data: dict | None = None) -> dict:
+    return _request("PUT", path, data=data or {})
 
 
 def _delete(path: str) -> dict:
-    r = httpx.delete(f"{MEALIE_URL}{path}", headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    return r.json() if r.text else {}
+    return _request("DELETE", path)
+
+
+def _items(data) -> list:
+    """Mealie endpoints sometimes return a paginated dict, sometimes a bare list."""
+    return data.get("items", []) if isinstance(data, dict) else data
 
 
 # ============================================================
 # RECIPES
 # ============================================================
 
-@mcp.tool()
-def search_recipes(query: str, per_page: int = 20) -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_search_recipes(query: str, per_page: int = 20) -> str:
     """Search recipes by name, ingredient, or keyword. Returns list of matching recipes."""
     data = _get("/api/recipes", {"search": query, "perPage": per_page})
     items = data.get("items", [])
@@ -66,8 +112,8 @@ def search_recipes(query: str, per_page: int = 20) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def get_recipe(slug: str) -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_get_recipe(slug: str) -> str:
     """Get full recipe details by slug. Includes ingredients, instructions, nutrition, times."""
     r = _get(f"/api/recipes/{slug}")
     lines = [f"# {r['name']}", ""]
@@ -111,22 +157,24 @@ def get_recipe(slug: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def list_recipes(per_page: int = 50, page: int = 1) -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_list_recipes(per_page: int = 50, page: int = 1) -> str:
     """List recipes with pagination. Returns recipe names and slugs."""
     data = _get("/api/recipes", {"perPage": per_page, "page": page})
     items = data.get("items", [])
     total = data.get("total", 0)
     if not items:
         return "No recipes found."
-    lines = [f"**{total} total recipes** (showing page {page})", ""]
+    has_more = page * per_page < total
+    more = ", more pages available" if has_more else ""
+    lines = [f"**{total} total recipes** (showing page {page}{more})", ""]
     for r in items:
         lines.append(f"- {r['name']} (slug: {r['slug']})")
     return "\n".join(lines)
 
 
-@mcp.tool()
-def create_recipe(
+@mcp.tool(annotations=ANNOT_WRITE)
+def mealie_create_recipe(
     name: str,
     description: str = "",
     servings: int = 4,
@@ -160,8 +208,8 @@ def create_recipe(
     return f"Created recipe: **{name}**\n🔗 {link}"
 
 
-@mcp.tool()
-def create_recipe_from_url(url: str) -> str:
+@mcp.tool(annotations=ANNOT_WRITE)
+def mealie_create_recipe_from_url(url: str) -> str:
     """Import a recipe by scraping a URL. Returns the created recipe slug."""
     r = _post("/api/recipes/create/url", {"url": url})
     slug = r.get("slug", "unknown")
@@ -169,8 +217,8 @@ def create_recipe_from_url(url: str) -> str:
     return f"Imported recipe (slug: {slug})\n🔗 {link}"
 
 
-@mcp.tool()
-def update_recipe(slug: str, name: str = "", description: str = "") -> str:
+@mcp.tool(annotations=ANNOT_WRITE)
+def mealie_update_recipe(slug: str, name: str = "", description: str = "") -> str:
     """Update a recipe's name and/or description."""
     data = {}
     if name:
@@ -183,9 +231,9 @@ def update_recipe(slug: str, name: str = "", description: str = "") -> str:
     return f"Updated recipe: {slug}"
 
 
-@mcp.tool()
-def delete_recipe(slug: str) -> str:
-    """Delete a recipe by slug."""
+@mcp.tool(annotations=ANNOT_DESTRUCTIVE)
+def mealie_delete_recipe(slug: str) -> str:
+    """Delete a recipe by slug. This cannot be undone."""
     _delete(f"/api/recipes/{slug}")
     return f"Deleted recipe: {slug}"
 
@@ -194,8 +242,8 @@ def delete_recipe(slug: str) -> str:
 # MEAL PLANS
 # ============================================================
 
-@mcp.tool()
-def get_today_mealplan() -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_get_today_mealplan() -> str:
     """Get today's meal plan."""
     items = _get("/api/households/mealplans/today")
     if not items:
@@ -211,8 +259,8 @@ def get_today_mealplan() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def list_mealplans(start_date: str, end_date: str) -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_list_mealplans(start_date: str, end_date: str) -> str:
     """List meal plans for a date range. Dates in YYYY-MM-DD format."""
     items = _get("/api/households/mealplans", {"start_date": start_date, "end_date": end_date})
     if not items:
@@ -229,8 +277,8 @@ def list_mealplans(start_date: str, end_date: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def create_mealplan(date: str, entry_type: str, title: str = "", recipe_slug: str = "") -> str:
+@mcp.tool(annotations=ANNOT_WRITE)
+def mealie_create_mealplan(date: str, entry_type: str, title: str = "", recipe_slug: str = "") -> str:
     """Create a meal plan entry. entry_type: breakfast/lunch/dinner/snack.
     Provide either title (free text) or recipe_slug (link to a recipe)."""
     entry = {"date": date, "entryType": entry_type}
@@ -238,12 +286,12 @@ def create_mealplan(date: str, entry_type: str, title: str = "", recipe_slug: st
         entry["title"] = title
     if recipe_slug:
         entry["recipe"] = {"slug": recipe_slug}
-    r = _post("/api/households/mealplans", entry)
+    _post("/api/households/mealplans", entry)
     return f"Created meal plan: {date} {entry_type}"
 
 
-@mcp.tool()
-def delete_mealplan(mealplan_id: str) -> str:
+@mcp.tool(annotations=ANNOT_DESTRUCTIVE)
+def mealie_delete_mealplan(mealplan_id: str) -> str:
     """Delete a meal plan entry by ID."""
     _delete(f"/api/households/mealplans/{mealplan_id}")
     return f"Deleted meal plan entry: {mealplan_id}"
@@ -253,11 +301,11 @@ def delete_mealplan(mealplan_id: str) -> str:
 # SHOPPING LISTS
 # ============================================================
 
-@mcp.tool()
-def list_shopping_lists() -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_list_shopping_lists() -> str:
     """List all shopping lists."""
     data = _get("/api/households/shopping/lists")
-    items = data.get("items", []) if isinstance(data, dict) else data
+    items = _items(data)
     if not items:
         return "No shopping lists found."
     lines = []
@@ -269,8 +317,8 @@ def list_shopping_lists() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def get_shopping_list(list_id: str) -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_get_shopping_list(list_id: str) -> str:
     """Get a shopping list with all its items."""
     sl = _get(f"/api/households/shopping/lists/{list_id}")
     name = sl.get("name", "Unnamed")
@@ -290,16 +338,16 @@ def get_shopping_list(list_id: str) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def create_shopping_list(name: str) -> str:
+@mcp.tool(annotations=ANNOT_WRITE)
+def mealie_create_shopping_list(name: str) -> str:
     """Create a new shopping list."""
     r = _post("/api/households/shopping/lists", {"name": name})
     sid = r.get("id", "unknown")
     return f"Created shopping list: **{name}** (id: {sid})"
 
 
-@mcp.tool()
-def add_shopping_item(list_id: str, food_name: str, quantity: float = 1, unit: str = "") -> str:
+@mcp.tool(annotations=ANNOT_WRITE)
+def mealie_add_shopping_item(list_id: str, food_name: str, quantity: float = 1, unit: str = "") -> str:
     """Add an item to a shopping list."""
     item = {"shoppingListId": list_id, "quantity": quantity, "checked": False}
     if food_name:
@@ -310,8 +358,8 @@ def add_shopping_item(list_id: str, food_name: str, quantity: float = 1, unit: s
     return f"Added {quantity} {unit} {food_name} to list"
 
 
-@mcp.tool()
-def add_recipe_to_shopping_list(list_id: str, recipe_slug: str) -> str:
+@mcp.tool(annotations=ANNOT_WRITE)
+def mealie_add_recipe_to_shopping_list(list_id: str, recipe_slug: str) -> str:
     """Add all ingredients from a recipe to a shopping list."""
     # Get recipe to find its ID
     recipe = _get(f"/api/recipes/{recipe_slug}")
@@ -322,23 +370,23 @@ def add_recipe_to_shopping_list(list_id: str, recipe_slug: str) -> str:
     return f"Added ingredients from **{recipe.get('name', recipe_slug)}** to shopping list"
 
 
-@mcp.tool()
-def check_shopping_item(list_id: str, item_id: str, checked: bool = True) -> str:
+@mcp.tool(annotations=ANNOT_WRITE)
+def mealie_check_shopping_item(list_id: str, item_id: str, checked: bool = True) -> str:
     """Mark a shopping list item as checked or unchecked."""
     _put(f"/api/households/shopping/lists/{list_id}/items/{item_id}", {"checked": checked})
     status = "checked" if checked else "unchecked"
     return f"Item {status}"
 
 
-@mcp.tool()
-def delete_shopping_item(list_id: str, item_id: str) -> str:
+@mcp.tool(annotations=ANNOT_DESTRUCTIVE)
+def mealie_delete_shopping_item(list_id: str, item_id: str) -> str:
     """Remove an item from a shopping list."""
     _delete(f"/api/households/shopping/lists/{list_id}/items/{item_id}")
     return "Item removed"
 
 
-@mcp.tool()
-def clear_checked_items(list_id: str) -> str:
+@mcp.tool(annotations=ANNOT_DESTRUCTIVE)
+def mealie_clear_checked_items(list_id: str) -> str:
     """Remove all checked items from a shopping list."""
     _delete(f"/api/households/shopping/lists/{list_id}/clear")
     return "Checked items cleared"
@@ -348,11 +396,11 @@ def clear_checked_items(list_id: str) -> str:
 # ORGANIZATION
 # ============================================================
 
-@mcp.tool()
-def list_categories() -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_list_categories() -> str:
     """List all recipe categories."""
     data = _get("/api/organizers/categories")
-    items = data.get("items", []) if isinstance(data, dict) else data
+    items = _items(data)
     if not items:
         return "No categories found."
     lines = []
@@ -361,11 +409,11 @@ def list_categories() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def list_tags() -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_list_tags() -> str:
     """List all recipe tags."""
     data = _get("/api/organizers/tags")
-    items = data.get("items", []) if isinstance(data, dict) else data
+    items = _items(data)
     if not items:
         return "No tags found."
     lines = []
@@ -374,22 +422,22 @@ def list_tags() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def list_foods(per_page: int = 50) -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_list_foods(per_page: int = 50) -> str:
     """List known food items/ingredients."""
     data = _get("/api/foods", {"perPage": per_page})
-    items = data.get("items", []) if isinstance(data, dict) else data
+    items = _items(data)
     if not items:
         return "No foods found."
     lines = [f"- {f.get('name', '?')}" for f in items]
     return "\n".join(lines)
 
 
-@mcp.tool()
-def list_units() -> str:
+@mcp.tool(annotations=ANNOT_READ)
+def mealie_list_units() -> str:
     """List measurement units."""
     data = _get("/api/units")
-    items = data.get("items", []) if isinstance(data, dict) else data
+    items = _items(data)
     if not items:
         return "No units found."
     lines = [f"- {u.get('name', '?')} ({u.get('abbreviation', '')})" for u in items]
