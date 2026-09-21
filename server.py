@@ -100,7 +100,7 @@ def _items(data) -> list:
 
 @mcp.tool(annotations=ANNOT_READ)
 def mealie_search_recipes(query: str, per_page: int = 20) -> str:
-    """Search recipes by name, ingredient, or keyword. Returns list of matching recipes."""
+    """Search recipes by name, ingredient, or keyword. The query is required; use mealie_list_recipes to browse all."""
     data = _get("/api/recipes", {"search": query, "perPage": per_page})
     items = data.get("items", [])
     if not items:
