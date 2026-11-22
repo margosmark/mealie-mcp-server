@@ -31,10 +31,23 @@ Placeholders only — never commit real values. The server reads them from its e
 ### pip
 
 ```bash
+pip install mealie-mcp-server
+MEALIE_URL=https://mealie.example.com MEALIE_API_KEY=<token> mealie-mcp-server
+```
+
+### uvx (no install)
+
+```bash
+uvx --from mealie-mcp-server mealie-mcp-server
+```
+
+### From source
+
+```bash
 git clone https://github.com/margosmark/mealie-mcp-server.git
 cd mealie-mcp-server
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### Docker
@@ -59,8 +72,7 @@ Windows: `%APPDATA%\Claude\claude_desktop_config.json`):
 {
   "mcpServers": {
     "mealie": {
-      "command": "python",
-      "args": ["/absolute/path/to/mealie-mcp-server/server.py"],
+      "command": "mealie-mcp-server",
       "env": {
         "MEALIE_URL": "https://mealie.example.com",
         "MEALIE_API_KEY": "<your-mealie-api-key>"
@@ -102,8 +114,7 @@ Create `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` for global) w
 {
   "mcpServers": {
     "mealie": {
-      "command": "python",
-      "args": ["/absolute/path/to/mealie-mcp-server/server.py"],
+      "command": "mealie-mcp-server",
       "env": {
         "MEALIE_URL": "https://mealie.example.com",
         "MEALIE_API_KEY": "<your-mealie-api-key>"

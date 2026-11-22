@@ -2,9 +2,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install the package itself so dependencies and the console script both come
+# from pyproject.toml rather than a parallel requirements file.
+COPY pyproject.toml README.md LICENSE ./
+COPY mealie_mcp_server ./mealie_mcp_server
+RUN pip install --no-cache-dir .
 
-COPY server.py .
-
-ENTRYPOINT ["python", "server.py"]
+ENTRYPOINT ["mealie-mcp-server"]

@@ -13,16 +13,30 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 # --- Config ---
-MEALIE_URL = os.environ["MEALIE_URL"].rstrip("/")
-MEALIE_API_KEY = os.environ["MEALIE_API_KEY"]
+# Read lazily so importing the package (tests, tooling) needs no live instance.
+MEALIE_URL = os.environ.get("MEALIE_URL", "").rstrip("/")
+MEALIE_API_KEY = os.environ.get("MEALIE_API_KEY", "")
 
-HEADERS = {
-    "Authorization": f"Bearer {MEALIE_API_KEY}",
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-}
+MISSING_CONFIG_MESSAGE = (
+    "MEALIE_URL and MEALIE_API_KEY must be set. Point MEALIE_URL at your Mealie "
+    "base URL (for example https://mealie.example.com) and MEALIE_API_KEY at a "
+    "token from Mealie -> user menu -> Manage Your Data -> API Tokens."
+)
+
+
+def _headers() -> dict:
+    if not MEALIE_URL or not MEALIE_API_KEY:
+        raise ToolError(MISSING_CONFIG_MESSAGE)
+    return {
+        "Authorization": f"Bearer {MEALIE_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
 
 mcp = FastMCP("mealie")
+
+# Cached default group slug, resolved once from /api/app/about.
+_GROUP_SLUG: str | None = None
 
 # --- Annotation presets ---
 ANNOT_READ = {
@@ -46,13 +60,13 @@ ANNOT_DESTRUCTIVE = {
 
 
 # --- Helpers ---
-def _request(method: str, path: str, params: dict | None = None, data: dict | None = None) -> dict:
+def _request(method: str, path: str, params: dict | None = None, data: dict | list | None = None) -> dict:
     """Single HTTP entry point with actionable error handling."""
     try:
         r = httpx.request(
             method,
             f"{MEALIE_URL}{path}",
-            headers=HEADERS,
+            headers=_headers(),
             params=params,
             json=data,
             timeout=30,
@@ -77,12 +91,12 @@ def _get(path: str, params: dict | None = None) -> dict:
     return _request("GET", path, params=params)
 
 
-def _post(path: str, data: dict | None = None) -> dict:
-    return _request("POST", path, data=data or {})
+def _post(path: str, data: dict | list | None = None) -> dict:
+    return _request("POST", path, data=data if data is not None else {})
 
 
-def _put(path: str, data: dict | None = None) -> dict:
-    return _request("PUT", path, data=data or {})
+def _put(path: str, data: dict | list | None = None) -> dict:
+    return _request("PUT", path, data=data if data is not None else {})
 
 
 def _delete(path: str) -> dict:
@@ -92,6 +106,46 @@ def _delete(path: str) -> dict:
 def _items(data) -> list:
     """Mealie endpoints sometimes return a paginated dict, sometimes a bare list."""
     return data.get("items", []) if isinstance(data, dict) else data
+
+
+def _resolve_food_id(name: str, create: bool = True) -> str | None:
+    """v3.x ignores a nested food object on shopping items; it wants foodId.
+    Look the food up by name and create it if missing."""
+    wanted = name.strip().lower()
+    if not wanted:
+        return None
+    foods = _items(_get("/api/foods", {"search": name, "perPage": 50}))
+    for f in foods:
+        if (f.get("name") or "").strip().lower() == wanted:
+            return f.get("id")
+    if not create:
+        return None
+    created = _post("/api/foods", {"name": name.strip()})
+    return created.get("id")
+
+
+def _resolve_unit_id(name: str) -> str | None:
+    """Same for units: name -> unitId."""
+    wanted = name.strip().lower()
+    if not wanted:
+        return None
+    for u in _items(_get("/api/units", {"perPage": 100})):
+        if (u.get("name") or "").strip().lower() == wanted or (u.get("abbreviation") or "").strip().lower() == wanted:
+            return u.get("id")
+    return None
+
+
+def _recipe_link(slug: str) -> str:
+    """Deep link to a recipe. The group slug is instance-specific, so resolve it
+    rather than hardcoding /g/home/ (a non-default group would 404)."""
+    global _GROUP_SLUG
+    if _GROUP_SLUG is None:
+        try:
+            _GROUP_SLUG = (_get("/api/app/about") or {}).get("defaultGroupSlug") or "home"
+        except Exception:
+            # A deep link must never fail the whole tool call.
+            _GROUP_SLUG = "home"
+    return f"{MEALIE_URL}/g/{_GROUP_SLUG}/r/{slug}"
 
 
 # ============================================================
@@ -152,8 +206,7 @@ def mealie_get_recipe(slug: str) -> str:
         for k, v in nut.items():
             if v:
                 lines.append(f"- {k}: {v}")
-    link = f"{MEALIE_URL}/g/home/r/{slug}"
-    lines.append(f"\n🔗 {link}")
+    lines.append(f"\n🔗 {_recipe_link(slug)}")
     return "\n".join(lines)
 
 
@@ -204,8 +257,7 @@ def mealie_create_recipe(
 
     r = _post("/api/recipes", recipe)
     slug = r.get("slug", "unknown")
-    link = f"{MEALIE_URL}/g/home/r/{slug}"
-    return f"Created recipe: **{name}**\n🔗 {link}"
+    return f"Created recipe: **{name}**\n🔗 {_recipe_link(slug)}"
 
 
 @mcp.tool(annotations=ANNOT_WRITE)
@@ -213,8 +265,7 @@ def mealie_create_recipe_from_url(url: str) -> str:
     """Import a recipe by scraping a URL. Returns the created recipe slug."""
     r = _post("/api/recipes/create/url", {"url": url})
     slug = r.get("slug", "unknown")
-    link = f"{MEALIE_URL}/g/home/r/{slug}"
-    return f"Imported recipe (slug: {slug})\n🔗 {link}"
+    return f"Imported recipe (slug: {slug})\n🔗 {_recipe_link(slug)}"
 
 
 @mcp.tool(annotations=ANNOT_WRITE)
@@ -245,7 +296,7 @@ def mealie_delete_recipe(slug: str) -> str:
 @mcp.tool(annotations=ANNOT_READ)
 def mealie_get_today_mealplan() -> str:
     """Get today's meal plan."""
-    items = _get("/api/households/mealplans/today")
+    items = _items(_get("/api/households/mealplans/today"))
     if not items:
         return "No meals planned for today."
     lines = ["## Today's Meals", ""]
@@ -262,7 +313,9 @@ def mealie_get_today_mealplan() -> str:
 @mcp.tool(annotations=ANNOT_READ)
 def mealie_list_mealplans(start_date: str, end_date: str) -> str:
     """List meal plans for a date range. Dates in YYYY-MM-DD format."""
-    items = _get("/api/households/mealplans", {"start_date": start_date, "end_date": end_date})
+    # v3.x returns a paginated envelope here ({"items": [...], "total": n});
+    # iterating it directly raised AttributeError on the dict keys.
+    items = _items(_get("/api/households/mealplans", {"start_date": start_date, "end_date": end_date, "perPage": 100}))
     if not items:
         return "No meal plans found for this range."
     lines = [f"## Meal Plans ({start_date} to {end_date})", ""]
@@ -312,7 +365,7 @@ def mealie_list_shopping_lists() -> str:
     for sl in items:
         name = sl.get("name", "Unnamed")
         sid = sl.get("id", "?")
-        count = len(sl.get("shoppingListItems", []))
+        count = len(sl.get("listItems") or sl.get("shoppingListItems") or [])
         lines.append(f"- **{name}** (id: {sid}, {count} items)")
     return "\n".join(lines)
 
@@ -322,7 +375,8 @@ def mealie_get_shopping_list(list_id: str) -> str:
     """Get a shopping list with all its items."""
     sl = _get(f"/api/households/shopping/lists/{list_id}")
     name = sl.get("name", "Unnamed")
-    items = sl.get("shoppingListItems", [])
+    # v3.x renamed shoppingListItems -> listItems; accept either.
+    items = sl.get("listItems") or sl.get("shoppingListItems") or []
     if not items:
         return f"**{name}** — empty"
     lines = [f"## {name}", ""]
@@ -349,13 +403,24 @@ def mealie_create_shopping_list(name: str) -> str:
 @mcp.tool(annotations=ANNOT_WRITE)
 def mealie_add_shopping_item(list_id: str, food_name: str, quantity: float = 1, unit: str = "") -> str:
     """Add an item to a shopping list."""
-    item = {"shoppingListId": list_id, "quantity": quantity, "checked": False}
+    # v3.x items live at /households/shopping/items with shoppingListId in the
+    # body; /lists/{id}/items answers 405 Method Not Allowed.
+    item: dict = {"shoppingListId": list_id, "quantity": quantity, "checked": False}
     if food_name:
-        item["food"] = {"name": food_name}
+        food_id = _resolve_food_id(food_name)
+        if food_id:
+            item["foodId"] = food_id
+        else:
+            # Unknown food and creation failed: fall back to a free-text note,
+            # otherwise the item would be created blank.
+            item["note"] = food_name
     if unit:
-        item["unit"] = {"name": unit}
-    _post(f"/api/households/shopping/lists/{list_id}/items", item)
-    return f"Added {quantity} {unit} {food_name} to list"
+        unit_id = _resolve_unit_id(unit)
+        if unit_id:
+            item["unitId"] = unit_id
+    _post("/api/households/shopping/items", item)
+    label = f"{quantity} {unit} {food_name}".replace("  ", " ").strip()
+    return f"Added {label} to list"
 
 
 @mcp.tool(annotations=ANNOT_WRITE)
@@ -373,7 +438,8 @@ def mealie_add_recipe_to_shopping_list(list_id: str, recipe_slug: str) -> str:
 @mcp.tool(annotations=ANNOT_WRITE)
 def mealie_check_shopping_item(list_id: str, item_id: str, checked: bool = True) -> str:
     """Mark a shopping list item as checked or unchecked."""
-    _put(f"/api/households/shopping/lists/{list_id}/items/{item_id}", {"checked": checked})
+    # Bulk update endpoint; it takes an array of partial items.
+    _put("/api/households/shopping/items", [{"id": item_id, "shoppingListId": list_id, "checked": checked}])
     status = "checked" if checked else "unchecked"
     return f"Item {status}"
 
@@ -381,15 +447,21 @@ def mealie_check_shopping_item(list_id: str, item_id: str, checked: bool = True)
 @mcp.tool(annotations=ANNOT_DESTRUCTIVE)
 def mealie_delete_shopping_item(list_id: str, item_id: str) -> str:
     """Remove an item from a shopping list."""
-    _delete(f"/api/households/shopping/lists/{list_id}/items/{item_id}")
+    _delete(f"/api/households/shopping/items?ids={item_id}")
     return "Item removed"
 
 
 @mcp.tool(annotations=ANNOT_DESTRUCTIVE)
 def mealie_clear_checked_items(list_id: str) -> str:
     """Remove all checked items from a shopping list."""
-    _delete(f"/api/households/shopping/lists/{list_id}/clear")
-    return "Checked items cleared"
+    # There is no /clear endpoint in v3.x: read the list, then delete the
+    # checked item ids through the bulk endpoint.
+    sl = _get(f"/api/households/shopping/lists/{list_id}")
+    checked = [i["id"] for i in sl.get("listItems") or sl.get("shoppingListItems") or [] if i.get("checked")]
+    if not checked:
+        return "No checked items to clear."
+    _delete(f"/api/households/shopping/items?ids={','.join(checked)}")
+    return f"Cleared {len(checked)} checked item(s)"
 
 
 # ============================================================
@@ -429,8 +501,8 @@ def mealie_list_foods(per_page: int = 50) -> str:
     items = _items(data)
     if not items:
         return "No foods found."
-    lines = [f"- {f.get('name', '?')}" for f in items]
-    return "\n".join(lines)
+    lines = [f"- {(f.get('name') or '').strip()}" for f in items if (f.get("name") or "").strip()]
+    return "\n".join(lines) or "No foods found."
 
 
 @mcp.tool(annotations=ANNOT_READ)
@@ -440,13 +512,26 @@ def mealie_list_units() -> str:
     items = _items(data)
     if not items:
         return "No units found."
-    lines = [f"- {u.get('name', '?')} ({u.get('abbreviation', '')})" for u in items]
-    return "\n".join(lines)
+    lines = []
+    for u in items:
+        name = (u.get("name") or "").strip()
+        abbr = (u.get("abbreviation") or "").strip()
+        if not name:
+            continue
+        lines.append(f"- {name} ({abbr})" if abbr else f"- {name}")
+    return "\n".join(lines) or "No units found."
 
 
 # ============================================================
 # MAIN
 # ============================================================
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for the `mealie-mcp-server` console script."""
+    if not MEALIE_URL or not MEALIE_API_KEY:
+        raise SystemExit(MISSING_CONFIG_MESSAGE)
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
