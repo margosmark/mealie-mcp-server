@@ -30,15 +30,18 @@ Placeholders only — never commit real values. The server reads them from its e
 
 ### pip
 
+The PyPI distribution is `mcp-server-mealie`; the command it installs is
+`mealie-mcp-server`.
+
 ```bash
-pip install mealie-mcp-server
+pip install mcp-server-mealie
 MEALIE_URL=https://mealie.example.com MEALIE_API_KEY=<token> mealie-mcp-server
 ```
 
 ### uvx (no install)
 
 ```bash
-uvx --from mealie-mcp-server mealie-mcp-server
+uvx --from mcp-server-mealie mealie-mcp-server
 ```
 
 ### From source

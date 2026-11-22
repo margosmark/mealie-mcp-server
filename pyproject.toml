@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mealie-mcp-server"
-version = "1.0.0"
+name = "mcp-server-mealie"
+version = "1.0.1"
 description = "MCP server for Mealie: recipes, meal plans, shopping lists, categories, tags, foods and units"
 readme = "README.md"
 license = { file = "LICENSE" }

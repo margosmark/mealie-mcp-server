@@ -3,4 +3,4 @@
 from .server import mcp
 
 __all__ = ["mcp"]
-__version__ = "1.0.0"
+__version__ = "1.0.1"
